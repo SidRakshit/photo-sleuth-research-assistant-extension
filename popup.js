@@ -4,6 +4,10 @@ const chatOutput = document.getElementById("chatOutput");
 const chatInput = document.getElementById("chatInput");
 const sendButton = document.getElementById("sendButton");
 const getBioButton = document.getElementById("getBioButton");
+// --- New Button Reference ---
+const getMilitaryServiceButton = document.getElementById(
+	"getMilitaryServiceButton"
+);
 const statusElement = document.getElementById("status");
 
 let pageDataCache = null;
@@ -23,6 +27,13 @@ document.addEventListener("DOMContentLoaded", (event) => {
 	});
 
 	getBioButton.addEventListener("click", handleBioRequest);
+
+	// --- New Event Listener ---
+	getMilitaryServiceButton.addEventListener(
+		"click",
+		handleMilitaryServiceRequest
+	);
+	// --- End New Event Listener ---
 
 	chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 		console.log(
@@ -58,9 +69,9 @@ document.addEventListener("DOMContentLoaded", (event) => {
 							"bot"
 						);
 						statusElement.textContent = "Processing Error.";
-						isWaitingForBot = false;
+						isWaitingForBot = false; // Reset flag on error
 					} finally {
-						pendingActionHandler = null;
+						pendingActionHandler = null; // Clear handler after execution or error
 					}
 				} else {
 					console.log(
@@ -84,7 +95,8 @@ document.addEventListener("DOMContentLoaded", (event) => {
 				);
 				statusElement.textContent = "Error extracting HTML.";
 				isWaitingForBot = false;
-				pendingActionHandler = null;
+				isFetchingData = false; // Also reset fetching flag
+				pendingActionHandler = null; // Clear handler on error
 			}
 		} else if (message.action === "extractionError") {
 			console.error(
@@ -99,6 +111,7 @@ document.addEventListener("DOMContentLoaded", (event) => {
 		}
 	});
 
+	// Initialize page data cache and handler on load/reload
 	pageDataCache = null;
 	pendingActionHandler = null;
 	console.log("POPUP SCRIPT: Initial state reset.");
@@ -128,17 +141,18 @@ function addMessageToChat(text, sender) {
 				}
 			} else {
 				console.error("DOMPurify not ready or sanitize method missing.");
-				messageDiv.textContent = text;
+				messageDiv.textContent = text; // Fallback to textContent if libraries fail
 			}
 		} catch (e) {
 			console.error("Error processing or sanitizing bot message:", e);
-			messageDiv.textContent = text;
+			messageDiv.textContent = text; // Fallback to textContent on error
 		}
 	} else {
-		messageDiv.textContent = text;
+		messageDiv.textContent = text; // User messages are plain text
 	}
 
 	chatOutput.appendChild(messageDiv);
+	// Scroll to the bottom to show the latest message
 	chatOutput.scrollTop = chatOutput.scrollHeight;
 }
 
@@ -151,7 +165,7 @@ function handleUserInput() {
 		return;
 	}
 	addMessageToChat(question, "user");
-	chatInput.value = "";
+	chatInput.value = ""; // Clear input after sending
 	statusElement.textContent = "Thinking...";
 	isWaitingForBot = true;
 	checkCacheOrRequestData("generalQuestion", question);
@@ -170,6 +184,21 @@ function handleBioRequest() {
 	checkCacheOrRequestData("getBio");
 }
 
+// --- New Handler Function ---
+function handleMilitaryServiceRequest() {
+	if (isWaitingForBot || isFetchingData) {
+		console.log(
+			`Military Service request blocked: isWaitingForBot=${isWaitingForBot}, isFetchingData=${isFetchingData}`
+		);
+		return;
+	}
+	addMessageToChat("Requesting military service summary...", "user");
+	statusElement.textContent = "Preparing military service request...";
+	isWaitingForBot = true;
+	checkCacheOrRequestData("getMilitaryService"); // Use new action type
+}
+// --- End New Handler Function ---
+
 function checkCacheOrRequestData(actionType, question = null) {
 	console.log(
 		"POPUP SCRIPT: Checking cache or requesting data for action:",
@@ -177,8 +206,11 @@ function checkCacheOrRequestData(actionType, question = null) {
 	);
 	if (pageDataCache) {
 		console.log("POPUP SCRIPT: Using cached page data.");
+		// --- Route based on actionType ---
 		if (actionType === "getBio") {
 			getBiographicalInfo(pageDataCache);
+		} else if (actionType === "getMilitaryService") {
+			getMilitaryServiceSummary(pageDataCache); // Call new function
 		} else if (actionType === "generalQuestion" && question) {
 			callChatbotAPI(question, pageDataCache);
 		} else {
@@ -186,9 +218,10 @@ function checkCacheOrRequestData(actionType, question = null) {
 				"POPUP SCRIPT: Cached data available but action type unknown:",
 				actionType
 			);
-			isWaitingForBot = false;
+			isWaitingForBot = false; // Reset flag if action unknown
 			statusElement.textContent = "";
 		}
+		// --- End routing ---
 	} else {
 		console.log(
 			"POPUP SCRIPT: No cached data, requesting from content script."
@@ -196,13 +229,17 @@ function checkCacheOrRequestData(actionType, question = null) {
 		statusElement.textContent = "Extracting page content...";
 		isFetchingData = true;
 
+		// --- Set pending handler based on actionType ---
 		if (actionType === "getBio") {
 			pendingActionHandler = () => getBiographicalInfo(pageDataCache);
+		} else if (actionType === "getMilitaryService") {
+			pendingActionHandler = () => getMilitaryServiceSummary(pageDataCache); // Set handler for new action
 		} else if (actionType === "generalQuestion" && question) {
 			pendingActionHandler = () => callChatbotAPI(question, pageDataCache);
 		} else {
-			pendingActionHandler = null;
+			pendingActionHandler = null; // Should not happen if called correctly
 		}
+		// --- End set pending handler ---
 
 		requestDataFromContentScript();
 	}
@@ -225,7 +262,7 @@ function requestDataFromContentScript() {
 			statusElement.textContent = "Tab query error.";
 			isFetchingData = false;
 			isWaitingForBot = false;
-			pendingActionHandler = null;
+			pendingActionHandler = null; // Clear handler on error
 			return;
 		}
 		if (tabs[0] && tabs[0].id) {
@@ -234,11 +271,14 @@ function requestDataFromContentScript() {
 				targetTabId,
 				{ action: "extractDataRequest" },
 				(response) => {
+					// This callback primarily handles immediate errors from sendMessage.
+					// The actual data response is expected via the runtime.onMessage listener.
 					if (chrome.runtime.lastError) {
 						console.error(
 							"POPUP SCRIPT: Error encountered during tabs.sendMessage to content script:",
 							chrome.runtime.lastError.message
 						);
+						// Handle specific common errors
 						if (
 							chrome.runtime.lastError.message.includes(
 								"Receiving end does not exist"
@@ -251,14 +291,18 @@ function requestDataFromContentScript() {
 							statusElement.textContent = "Connection error.";
 							isFetchingData = false;
 							isWaitingForBot = false;
-							pendingActionHandler = null;
+							pendingActionHandler = null; // Clear handler
 						} else if (
 							chrome.runtime.lastError.message.includes("message port closed")
 						) {
+							// This can happen if the content script takes time to respond.
+							// We rely on the runtime.onMessage listener instead.
 							console.warn(
 								"POPUP SCRIPT: tabs.sendMessage port closed before response. Waiting for runtime.sendMessage response."
 							);
+							// Do not reset flags here, wait for the other message listener
 						} else {
+							// Handle other unexpected errors
 							addMessageToChat(
 								`Error communicating with page: ${chrome.runtime.lastError.message}`,
 								"bot"
@@ -266,12 +310,15 @@ function requestDataFromContentScript() {
 							statusElement.textContent = "Communication error.";
 							isFetchingData = false;
 							isWaitingForBot = false;
-							pendingActionHandler = null;
+							pendingActionHandler = null; // Clear handler
 						}
 					} else {
+						// Message sent successfully, response will come via runtime.onMessage
 						console.log(
 							"POPUP SCRIPT: extractDataRequest message sent via tabs.sendMessage (Waiting for response via runtime.onMessage)."
 						);
+						// Note: Don't assume success or data here. The actual data/error
+						// comes through the chrome.runtime.onMessage listener above.
 					}
 				}
 			);
@@ -281,15 +328,19 @@ function requestDataFromContentScript() {
 			statusElement.textContent = "Tab access error.";
 			isFetchingData = false;
 			isWaitingForBot = false;
-			pendingActionHandler = null;
+			pendingActionHandler = null; // Clear handler on error
 		}
 	});
 }
 
+// --- Perplexity API Call Function (Unchanged) ---
 async function callPerplexityAPI(systemPrompt, userPrompt) {
-	const apiKey = "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";
+	// --- !!! IMPORTANT: Replace with a secure way to handle API keys !!! ---
+	// Storing keys directly in the code is insecure, especially for public extensions.
+	// Consider using chrome.storage or a server-side proxy.
+	const apiKey = "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"; // Replace with your actual key securely
 	const apiUrl = "https://api.perplexity.ai/chat/completions";
-	const modelName = "sonar";
+	const modelName = "sonar"; // Replace if you want to use a different model
 
 	const messages = [
 		{ role: "system", content: systemPrompt },
@@ -297,63 +348,71 @@ async function callPerplexityAPI(systemPrompt, userPrompt) {
 	];
 
 	console.log("POPUP SCRIPT: Calling Perplexity API...");
-	const response = await fetch(apiUrl, {
-		method: "POST",
-		headers: {
-			Authorization: `Bearer ${apiKey}`,
-			"Content-Type": "application/json",
-			Accept: "application/json",
-		},
-		body: JSON.stringify({
-			model: modelName,
-			messages: messages,
-		}),
-	});
+	try {
+		const response = await fetch(apiUrl, {
+			method: "POST",
+			headers: {
+				Authorization: `Bearer ${apiKey}`,
+				"Content-Type": "application/json",
+				Accept: "application/json",
+			},
+			body: JSON.stringify({
+				model: modelName,
+				messages: messages,
+			}),
+		});
 
-	if (!response.ok) {
-		let errorBody = "Could not retrieve error details.";
-		let responseText = "";
-		try {
-			responseText = await response.text();
-			errorBody = responseText;
-			const errorJson = JSON.parse(responseText);
-			errorBody =
-				errorJson.error?.message ||
-				errorJson.detail ||
-				JSON.stringify(errorJson);
-		} catch (e) {
-			console.warn(
-				"POPUP SCRIPT: Could not parse API error response as JSON.",
-				responseText
+		if (!response.ok) {
+			let errorBody = "Could not retrieve error details.";
+			let responseText = "";
+			try {
+				responseText = await response.text(); // Read response body for details
+				errorBody = responseText; // Use raw text as fallback
+				// Attempt to parse as JSON for a structured error message
+				const errorJson = JSON.parse(responseText);
+				errorBody =
+					errorJson.error?.message ||
+					errorJson.detail ||
+					JSON.stringify(errorJson);
+			} catch (e) {
+				console.warn(
+					"POPUP SCRIPT: Could not parse API error response as JSON.",
+					responseText
+				);
+			}
+			console.error(
+				`POPUP SCRIPT: API Error ${response.status} ${response.statusText}: ${errorBody}`
+			);
+			console.error("POPUP SCRIPT: Raw API Error Response Text:", responseText); // Log raw text
+			throw new Error(`API request failed: ${response.status} - ${errorBody}`);
+		}
+
+		const result = await response.json();
+		console.log("POPUP SCRIPT: Raw API Success Response:", result); // Log raw success response
+
+		const botAnswer = result.choices?.[0]?.message?.content?.trim();
+
+		if (!botAnswer) {
+			console.error(
+				"POPUP SCRIPT: Unexpected API response format. 'content' not found:",
+				result
+			);
+			throw new Error(
+				`Received an unexpected response format from the API: ${JSON.stringify(
+					result
+				)}`
 			);
 		}
-		console.error(
-			`POPUP SCRIPT: API Error ${response.status} ${response.statusText}: ${errorBody}`
-		);
-		console.error("POPUP SCRIPT: Raw API Error Response Text:", responseText);
-		throw new Error(`API request failed: ${response.status} - ${errorBody}`);
+
+		return botAnswer;
+	} catch (error) {
+		// Network errors or errors during fetch/parsing
+		console.error("POPUP SCRIPT: Error during API call:", error);
+		throw new Error(`Failed to communicate with API: ${error.message}`);
 	}
-
-	const result = await response.json();
-	console.log("POPUP SCRIPT: Raw API Success Response:", result);
-
-	const botAnswer = result.choices?.[0]?.message?.content?.trim();
-
-	if (!botAnswer) {
-		console.error(
-			"POPUP SCRIPT: Unexpected API response format. 'content' not found:",
-			result
-		);
-		throw new Error(
-			`Received an unexpected response format from the API: ${JSON.stringify(
-				result
-			)}`
-		);
-	}
-
-	return botAnswer;
 }
 
+// --- General Question Function (Unchanged) ---
 async function callChatbotAPI(question, pageContextData) {
 	if (
 		!pageContextData ||
@@ -374,6 +433,7 @@ async function callChatbotAPI(question, pageContextData) {
 	console.log("POPUP SCRIPT: Preparing general question for API.");
 	statusElement.textContent = "Asking Perplexity AI...";
 
+	// Define the system prompt for the AI
 	const systemPrompt = `You are a helpful research assistant specializing in the American Civil War.
 Use the provided HTML content of a photo page from civilwarphotosleuth.com as the primary context for your answer.
 Analyze the HTML to understand the photo's details, identified individuals, evidence, and any other relevant text.
@@ -391,19 +451,20 @@ ${pageContextData.pageHtml}
 	try {
 		const botAnswer = await callPerplexityAPI(systemPrompt, question);
 		addMessageToChat(botAnswer, "bot");
-		statusElement.textContent = "";
+		statusElement.textContent = ""; // Clear status on success
 	} catch (error) {
 		console.error("POPUP SCRIPT: Error in callChatbotAPI:", error);
 		addMessageToChat(`Sorry, I encountered an error: ${error.message}`, "bot");
-		statusElement.textContent = "API Error.";
+		statusElement.textContent = "API Error."; // Update status on error
 	} finally {
 		console.log(
 			"POPUP SCRIPT: Finalizing callChatbotAPI, resetting isWaitingForBot."
 		);
-		isWaitingForBot = false;
+		isWaitingForBot = false; // Always reset the flag
 	}
 }
 
+// --- Biographical Info Function (Unchanged) ---
 async function getBiographicalInfo(pageContextData) {
 	if (
 		!pageContextData ||
@@ -465,18 +526,76 @@ ${pageContextData.pageHtml}
 	try {
 		const botAnswer = await callPerplexityAPI(systemPrompt, user_prompt);
 		addMessageToChat(botAnswer, "bot");
-		statusElement.textContent = "";
+		statusElement.textContent = ""; // Clear status on success
 	} catch (error) {
 		console.error("POPUP SCRIPT: Error in getBiographicalInfo:", error);
 		addMessageToChat(
 			`Sorry, I encountered an error while fetching biographical info: ${error.message}`,
 			"bot"
 		);
-		statusElement.textContent = "API Error.";
+		statusElement.textContent = "API Error."; // Update status on error
 	} finally {
 		console.log(
 			"POPUP SCRIPT: Finalizing getBiographicalInfo, resetting isWaitingForBot."
 		);
-		isWaitingForBot = false;
+		isWaitingForBot = false; // Always reset the flag
 	}
 }
+
+// --- New Military Service Summary Function ---
+async function getMilitaryServiceSummary(pageContextData) {
+	if (
+		!pageContextData ||
+		typeof pageContextData.pageHtml !== "string" ||
+		typeof pageContextData.pageUrl !== "string"
+	) {
+		console.error(
+			"POPUP SCRIPT: getMilitaryServiceSummary called without valid pageContextData."
+		);
+		addMessageToChat(
+			"Internal error: Missing page data for military service request.",
+			"bot"
+		);
+		statusElement.textContent = "Error.";
+		isWaitingForBot = false;
+		return;
+	}
+	console.log("POPUP SCRIPT: Preparing military service request for API.");
+	statusElement.textContent = "Getting military service summary...";
+
+	// --- !!! PLACEHOLDER PROMPTS - REPLACE THESE !!! ---
+	const systemPrompt = `You are a helpful research assistant specializing in the American Civil War military records.
+Use the provided HTML content of a photo page from civilwarphotosleuth.com as the primary context.
+Analyze the HTML to identify the main subject(s) and extract any available military service details.
+Supplement this with information found via web search to generate a military service summary.
+Format the output clearly using Markdown.
+
+Context URL: ${pageContextData.pageUrl}
+Webpage HTML Content:
+\`\`\`html
+${pageContextData.pageHtml}
+\`\`\`
+`;
+
+	const user_prompt = `Based *primarily* on the provided HTML content, please identify the main individual depicted or identified on the page. Then, provide a summary of that person's military service during the American Civil War, using both information from the HTML and external web search results. Focus on regiments, ranks, dates of service, key battles, and any notable events during their service. If information is not found, state "Unknown".`;
+	// --- !!! END PLACEHOLDER PROMPTS ---
+
+	try {
+		const botAnswer = await callPerplexityAPI(systemPrompt, user_prompt);
+		addMessageToChat(botAnswer, "bot");
+		statusElement.textContent = ""; // Clear status on success
+	} catch (error) {
+		console.error("POPUP SCRIPT: Error in getMilitaryServiceSummary:", error);
+		addMessageToChat(
+			`Sorry, I encountered an error while fetching the military service summary: ${error.message}`,
+			"bot"
+		);
+		statusElement.textContent = "API Error."; // Update status on error
+	} finally {
+		console.log(
+			"POPUP SCRIPT: Finalizing getMilitaryServiceSummary, resetting isWaitingForBot."
+		);
+		isWaitingForBot = false; // Always reset the flag
+	}
+}
+// --- End New Military Service Summary Function ---
