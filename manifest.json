@@ -1,0 +1,36 @@
+// manifest.json
+{
+    "manifest_version": 3,
+    "name": "Civil War Photo Sleuth Chatbot",
+    "version": "1.6",
+    "description": "Asks questions about photo details on civilwarphotosleuth.com pages using Perplexity AI.",
+    "permissions": [
+        "activeTab",
+        "scripting",
+        "tabs",
+        "sidePanel"
+    ],
+    "host_permissions": [
+        "https://api.perplexity.ai/*",
+        "*://*.civilwarphotosleuth.com/photos/view/*"
+    ],
+    "background": {
+        "service_worker": "background.js"
+    },
+    "content_scripts": [
+        {
+            "matches": [
+                "*://*.civilwarphotosleuth.com/photos/view/*"
+            ],
+            "js": [
+                "content.js"
+            ]
+        }
+    ],
+    "action": {
+        "default_title": "Civil War Photo Sleuth Chatbot"
+    },
+    "side_panel": {
+        "default_path": "popup.html"
+    }
+}
