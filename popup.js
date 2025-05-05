@@ -338,7 +338,7 @@ async function callPerplexityAPI(systemPrompt, userPrompt) {
 	// --- !!! IMPORTANT: Replace with a secure way to handle API keys !!! ---
 	// Storing keys directly in the code is insecure, especially for public extensions.
 	// Consider using chrome.storage or a server-side proxy.
-	const apiKey = "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"; // Replace with your actual key securely
+	const apiKey = "YOUR_PERP_API_KEY"; // Replace with your actual key securely
 	const apiUrl = "https://api.perplexity.ai/chat/completions";
 	const modelName = "sonar"; // Replace if you want to use a different model
 
