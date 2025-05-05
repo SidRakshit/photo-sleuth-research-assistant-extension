@@ -11,6 +11,7 @@ const statusElement = document.getElementById("status");
 let pageDataCache = null;
 let isFetchingData = false;
 let isWaitingForBot = false;
+let pendingActionHandler = null; // Variable to hold the function to call after data fetch
 
 // === Wait for the DOM to be fully loaded before setting up listeners ===
 document.addEventListener("DOMContentLoaded", (event) => {
@@ -28,12 +29,15 @@ document.addEventListener("DOMContentLoaded", (event) => {
 	getBioButton.addEventListener("click", handleBioRequest);
 
 	// --- Chrome Runtime Message Listener ---
+	// This listener handles responses sent via chrome.runtime.sendMessage from content.js
 	chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-		console.log("POPUP SCRIPT: Received message:", message.action); // Log received actions
+		console.log(
+			"POPUP SCRIPT: Received message via runtime.onMessage:",
+			message.action
+		);
 
 		if (message.action === "extractedDataResponse") {
-			isFetchingData = false;
-			statusElement.textContent = "Processing data..."; // Update status
+			isFetchingData = false; // Data fetch attempt is complete (successfully or with error)
 
 			if (
 				message.data &&
@@ -41,51 +45,50 @@ document.addEventListener("DOMContentLoaded", (event) => {
 				!message.data.error
 			) {
 				console.log(
-					"POPUP SCRIPT: Successfully extracted page data. Length:",
+					"POPUP SCRIPT: Successfully extracted page data via runtime message. Length:",
 					message.data.pageHtml.length
 				);
-				pageDataCache = message.data;
+				pageDataCache = message.data; // Store the fetched data
 
-				const pendingAction = sessionStorage.getItem("pendingAction");
-				const pendingQuestion = sessionStorage.getItem("pendingQuestion");
-				console.log(
-					"POPUP SCRIPT: Pending action:",
-					pendingAction,
-					"Pending question:",
-					!!pendingQuestion
-				);
-
-				sessionStorage.removeItem("pendingAction"); // Always clear pending action once data is received
-				sessionStorage.removeItem("pendingQuestion"); // Always clear pending question
-
-				if (!pageDataCache) {
-					// This check might be redundant now but safe to keep
-					addMessageToChat(
-						"Internal error: Failed to process page data.",
-						"bot"
-					);
-					statusElement.textContent = "Error.";
-					isWaitingForBot = false;
-					return;
-				}
-
-				if (pendingAction === "getBio") {
-					getBiographicalInfo(pageDataCache);
-				} else if (pendingAction === "generalQuestion" && pendingQuestion) {
-					callChatbotAPI(pendingQuestion, pageDataCache);
+				// Check if there's a function waiting to be called
+				if (typeof pendingActionHandler === "function") {
+					console.log("POPUP SCRIPT: Executing pending action handler.");
+					try {
+						// Execute the stored handler. It will manage its own status and isWaitingForBot state.
+						pendingActionHandler();
+					} catch (error) {
+						console.error(
+							"POPUP SCRIPT: Error executing pending action handler:",
+							error
+						);
+						addMessageToChat(
+							`Error processing request: ${error.message}`,
+							"bot"
+						);
+						statusElement.textContent = "Processing Error.";
+						isWaitingForBot = false; // Reset state fully on handler execution error
+					} finally {
+						// Clear the handler after execution attempt.
+						// isWaitingForBot is reset within the handler's own finally block.
+						pendingActionHandler = null;
+					}
 				} else {
-					// If no pending action, maybe just update status or do nothing
-					console.log("POPUP SCRIPT: No pending action after fetching data.");
-					statusElement.textContent = ""; // Clear status if nothing else to do
-					isWaitingForBot = false; // Ensure bot isn't marked as waiting
-					// Potentially add a message like "Page data loaded." if desired
+					// If no pending action, data might have been fetched proactively or by an unrelated event.
+					console.log(
+						"POPUP SCRIPT: No pending action after fetching data via runtime message."
+					);
+					// Only update status if the bot isn't supposed to be doing something else.
+					if (!isWaitingForBot) {
+						statusElement.textContent = "Page data loaded.";
+					}
 				}
 			} else {
+				// Handle errors in the received data structure
 				const errorMessage =
 					message.data?.error ||
 					"Received invalid data structure from content script.";
 				console.error(
-					"POPUP SCRIPT: Error in extractedDataResponse:",
+					"POPUP SCRIPT: Error in extractedDataResponse received via runtime message:",
 					errorMessage
 				);
 				addMessageToChat(
@@ -93,36 +96,33 @@ document.addEventListener("DOMContentLoaded", (event) => {
 					"bot"
 				);
 				statusElement.textContent = "Error extracting HTML.";
-				isWaitingForBot = false;
-				// Clear any pending actions on error
-				sessionStorage.removeItem("pendingAction");
-				sessionStorage.removeItem("pendingQuestion");
+				isWaitingForBot = false; // Reset state fully on data error
+				pendingActionHandler = null; // Clear pending action
 			}
 		} else if (message.action === "extractionError") {
-			console.error("POPUP SCRIPT: Received extractionError:", message.error);
+			// Handle specific extraction errors sent from content script via runtime message
+			console.error(
+				"POPUP SCRIPT: Received extractionError via runtime message:",
+				message.error
+			);
 			addMessageToChat("Error extracting HTML: " + message.error, "bot");
 			statusElement.textContent = "Extraction failed.";
 			isFetchingData = false;
-			isWaitingForBot = false;
-			sessionStorage.removeItem("pendingAction");
-			sessionStorage.removeItem("pendingQuestion");
+			isWaitingForBot = false; // Reset state fully on extraction error
+			pendingActionHandler = null; // Clear pending action
 		}
-		// Note: It's generally not recommended to use sendResponse asynchronously
-		// in onMessage listeners unless necessary. If not sending a response back
-		// to the sender (content.js in this case), you don't need sendResponse.
+		// Do NOT use `return true;` here unless you intend to send an async response back to the sender (content.js)
 	});
 
 	// --- Initial State Reset ---
 	pageDataCache = null;
-	sessionStorage.removeItem("pendingAction");
-	sessionStorage.removeItem("pendingQuestion");
+	pendingActionHandler = null;
 	console.log("POPUP SCRIPT: Initial state reset.");
 
-	// Add initial bot message if needed
-	// addMessageToChat("Ask a question or request biographical info!", "bot");
+	// Initial bot message moved to HTML for simplicity
 }); // End of DOMContentLoaded listener
 
-// === Function Definitions (can be outside DOMContentLoaded) ===
+// === Function Definitions ===
 
 function addMessageToChat(text, sender) {
 	const messageDiv = document.createElement("div");
@@ -130,199 +130,218 @@ function addMessageToChat(text, sender) {
 
 	if (sender === "bot") {
 		try {
-			// Check if DOMPurify and its sanitize method are ready
-			// Use a more robust check, ensuring DOMPurify itself is defined first
+			// Ensure DOMPurify and Marked are loaded before using them
 			if (
 				typeof DOMPurify !== "undefined" &&
 				typeof DOMPurify.sanitize === "function"
 			) {
-				// Check if Marked is ready too
 				if (
 					typeof marked !== "undefined" &&
 					typeof marked.parse === "function"
 				) {
-					console.log(
-						"POPUP SCRIPT: Using Marked and DOMPurify for bot message."
-					);
-					const rawHtml = marked.parse(text, { breaks: true }); // Parse Markdown, convert \n to <br>
-					const sanitizedHtml = DOMPurify.sanitize(rawHtml); // Sanitize the result
+					const rawHtml = marked.parse(text, { breaks: true }); // Convert markdown with line breaks
+					const sanitizedHtml = DOMPurify.sanitize(rawHtml); // Sanitize the HTML
 					messageDiv.innerHTML = sanitizedHtml;
 				} else {
-					console.warn(
-						"Marked library not ready, falling back to DOMPurify only."
-					);
-					// Fallback using only DOMPurify if Marked isn't ready
-					const sanitizedText = DOMPurify.sanitize(text); // Sanitize raw text (won't parse Markdown)
-					messageDiv.innerHTML = sanitizedText.replace(/\n/g, "<br>"); // Basic newline conversion
+					console.warn("Marked library not ready, using DOMPurify only.");
+					const sanitizedText = DOMPurify.sanitize(text); // Sanitize text directly
+					messageDiv.innerHTML = sanitizedText.replace(/\n/g, "<br>"); // Basic line breaks
 				}
 			} else {
-				// Log the state if DOMPurify isn't ready
-				console.error(
-					"DOMPurify not ready or sanitize method missing at time of execution."
-				);
-				console.log("typeof DOMPurify:", typeof DOMPurify);
-				// Fallback to plain text if DOMPurify isn't available
-				messageDiv.textContent = text;
+				console.error("DOMPurify not ready or sanitize method missing.");
+				messageDiv.textContent = text; // Fallback to plain text
 			}
 		} catch (e) {
 			console.error("Error processing or sanitizing bot message:", e);
-			messageDiv.textContent = text; // Fallback in case of any error during processing
+			messageDiv.textContent = text; // Fallback in case of any error
 		}
 	} else {
-		// For user messages, just display as plain text
+		// User messages are plain text
 		messageDiv.textContent = text;
 	}
 
 	chatOutput.appendChild(messageDiv);
-	// Ensure the chat scrolls to the bottom to show the new message
+	// Ensure the chat scrolls to the bottom
 	chatOutput.scrollTop = chatOutput.scrollHeight;
 }
 
 function handleUserInput() {
 	const question = chatInput.value.trim();
+	// Prevent action if already waiting for bot OR fetching data
 	if (!question || isWaitingForBot || isFetchingData) {
+		console.log(
+			`Input blocked: question=${!!question}, isWaitingForBot=${isWaitingForBot}, isFetchingData=${isFetchingData}`
+		);
 		return;
 	}
 	addMessageToChat(question, "user");
-	chatInput.value = ""; // Clear input after sending
-	statusElement.textContent = "Thinking...";
-	isWaitingForBot = true;
+	chatInput.value = "";
+	statusElement.textContent = "Thinking..."; // Set initial status
+	isWaitingForBot = true; // Set waiting flag HERE
 	checkCacheOrRequestData("generalQuestion", question);
 }
 
 function handleBioRequest() {
+	// Prevent action if already waiting for bot OR fetching data
 	if (isWaitingForBot || isFetchingData) {
+		console.log(
+			`Bio request blocked: isWaitingForBot=${isWaitingForBot}, isFetchingData=${isFetchingData}`
+		);
 		return;
 	}
 	addMessageToChat("Requesting biographical info...", "user");
-	statusElement.textContent = "Preparing bio request...";
-	isWaitingForBot = true;
+	statusElement.textContent = "Preparing bio request..."; // Set initial status
+	isWaitingForBot = true; // Set waiting flag HERE
 	checkCacheOrRequestData("getBio");
 }
 
+// Check cache or initiate data request
 function checkCacheOrRequestData(actionType, question = null) {
 	console.log(
 		"POPUP SCRIPT: Checking cache or requesting data for action:",
 		actionType
 	);
 	if (pageDataCache) {
+		// Data is cached, execute the action directly
 		console.log("POPUP SCRIPT: Using cached page data.");
+		// The functions below will manage the `isWaitingForBot` state and status updates.
 		if (actionType === "getBio") {
 			getBiographicalInfo(pageDataCache);
 		} else if (actionType === "generalQuestion" && question) {
 			callChatbotAPI(question, pageDataCache);
 		} else {
-			// Added else to handle cases where action might not match expected after cache check
 			console.warn(
 				"POPUP SCRIPT: Cached data available but action type unknown:",
 				actionType
 			);
-			isWaitingForBot = false; // Ensure bot isn't stuck waiting
+			// If the action was unknown but we had cache, reset state just in case.
+			isWaitingForBot = false;
 			statusElement.textContent = "";
 		}
 	} else {
+		// Data not cached, request it
 		console.log(
 			"POPUP SCRIPT: No cached data, requesting from content script."
 		);
-		statusElement.textContent = "Extracting page content..."; // More accurate status
-		isFetchingData = true;
-		sessionStorage.setItem("pendingAction", actionType);
-		if (question) {
-			sessionStorage.setItem("pendingQuestion", question);
+		statusElement.textContent = "Extracting page content...";
+		isFetchingData = true; // Set fetching flag
+
+		// Store the correct handler function to be called after data arrives.
+		// Use closures to ensure `pageDataCache` is accessed *after* it's updated.
+		if (actionType === "getBio") {
+			pendingActionHandler = () => getBiographicalInfo(pageDataCache);
+		} else if (actionType === "generalQuestion" && question) {
+			pendingActionHandler = () => callChatbotAPI(question, pageDataCache);
+		} else {
+			pendingActionHandler = null; // Safety reset
 		}
-		requestDataFromContentScript();
+
+		requestDataFromContentScript(); // Initiate the data request
 	}
 }
 
+// Sends request to content script via tabs.sendMessage
 function requestDataFromContentScript() {
-	console.log("POPUP SCRIPT: Sending extractDataRequest to content script.");
+	console.log(
+		"POPUP SCRIPT: Sending extractDataRequest to content script via tabs.sendMessage."
+	);
 	chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+		// Handle errors getting the active tab
 		if (chrome.runtime.lastError) {
 			console.error(
 				"POPUP SCRIPT: Error querying tabs:",
 				chrome.runtime.lastError.message
 			);
 			addMessageToChat(
-				"Error accessing current tab: " + chrome.runtime.lastError.message,
+				`Error accessing current tab: ${chrome.runtime.lastError.message}`,
 				"bot"
 			);
 			statusElement.textContent = "Tab query error.";
+			// Reset state fully on error
 			isFetchingData = false;
 			isWaitingForBot = false;
-			sessionStorage.removeItem("pendingAction");
-			sessionStorage.removeItem("pendingQuestion");
+			pendingActionHandler = null;
 			return;
 		}
 		if (tabs[0] && tabs[0].id) {
 			const targetTabId = tabs[0].id;
-			// Using setTimeout might still be okay as a small buffer, but isn't strictly necessary
-			// if the content script is already loaded and listening reliably.
-			// setTimeout(() => {
+			// Send the message. The response/data will primarily be handled by the runtime.onMessage listener.
+			// The callback here is mainly for catching immediate errors (e.g., content script not injected).
 			chrome.tabs.sendMessage(
 				targetTabId,
 				{ action: "extractDataRequest" },
 				(response) => {
-					// This callback in sendMessage is often less reliable for checking success
-					// than the listener in the content script sending a response back.
-					// Rely on the chrome.runtime.onMessage listener for the actual data/error.
+					// This callback might not receive the actual data if content script uses runtime.sendMessage.
+					// Check chrome.runtime.lastError for immediate connection issues.
 					if (chrome.runtime.lastError) {
-						// This error often means the content script isn't ready or listening
 						console.error(
-							"POPUP SCRIPT: Error sending message to content script:",
+							"POPUP SCRIPT: Error encountered during tabs.sendMessage to content script:",
 							chrome.runtime.lastError.message
 						);
-						// Check if it's the specific "no receiving end" error
+						// Handle specific errors
 						if (
 							chrome.runtime.lastError.message.includes(
 								"Receiving end does not exist"
 							)
 						) {
+							// Content script likely not injected or accessible
 							addMessageToChat(
-								"Error: Cannot connect to the page. Try refreshing the page or ensure you're on a valid civilwarphotosleuth.com/photos/view/ page.",
+								"Error: Cannot connect to the page. Check if it's the correct URL and try refreshing.",
 								"bot"
 							);
 							statusElement.textContent = "Connection error.";
+							// Reset state fully ONLY if we're sure the content script isn't there
+							isFetchingData = false;
+							isWaitingForBot = false;
+							pendingActionHandler = null;
+						} else if (
+							chrome.runtime.lastError.message.includes("message port closed")
+						) {
+							// Port closed early. This might happen if content script takes too long.
+							// We will rely on the runtime.onMessage listener, so just log a warning.
+							console.warn(
+								"POPUP SCRIPT: tabs.sendMessage port closed before response. Waiting for runtime.sendMessage response."
+							);
 						} else {
+							// Other immediate errors sending the message
 							addMessageToChat(
-								"Error communicating with page: " +
-									chrome.runtime.lastError.message,
+								`Error communicating with page: ${chrome.runtime.lastError.message}`,
 								"bot"
 							);
 							statusElement.textContent = "Communication error.";
+							// Reset state fully on other errors
+							isFetchingData = false;
+							isWaitingForBot = false;
+							pendingActionHandler = null;
 						}
-						// Reset state if sending failed
-						isFetchingData = false;
-						isWaitingForBot = false;
-						sessionStorage.removeItem("pendingAction");
-						sessionStorage.removeItem("pendingQuestion");
 					} else {
+						// Message was apparently sent successfully via tabs.sendMessage
 						console.log(
-							"POPUP SCRIPT: extractDataRequest message sent successfully."
+							"POPUP SCRIPT: extractDataRequest message sent via tabs.sendMessage (Waiting for response via runtime.onMessage)."
 						);
-						// Success here just means the message was sent, not that data was extracted.
-						// Wait for the onMessage listener to handle the response.
+						// Do NOT change state here; wait for the actual response or error in the runtime listener.
 					}
-				}
-			);
-			// }, 100); // Delay might not be needed
+				} // End of sendMessage callback
+			); // End of sendMessage call
 		} else {
+			// Error getting tab ID
 			console.error("POPUP SCRIPT: Could not find active tab ID.");
 			addMessageToChat("Cannot access the current tab.", "bot");
 			statusElement.textContent = "Tab access error.";
+			// Reset state fully on error
 			isFetchingData = false;
 			isWaitingForBot = false;
-			sessionStorage.removeItem("pendingAction");
-			sessionStorage.removeItem("pendingQuestion");
+			pendingActionHandler = null;
 		}
-	});
+	}); // End of tabs.query
 }
 
+// --- Perplexity API Call ---
 async function callPerplexityAPI(systemPrompt, userPrompt) {
-	// IMPORTANT: Hardcoding API keys is insecure. Consider using chrome.storage or a backend.
-	const apiKey = "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"; // Replace with your actual key IF NEEDED FOR TESTING, but ideally remove
-
+	// IMPORTANT: Keep API key secure. Avoid hardcoding in production.
+	const apiKey = "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";
 	const apiUrl = "https://api.perplexity.ai/chat/completions";
-	const modelName = "sonar"; // Updated model
+	const modelName = "sonar"; // Ensure this is the desired model
 
 	const messages = [
 		{ role: "system", content: systemPrompt },
@@ -340,15 +359,16 @@ async function callPerplexityAPI(systemPrompt, userPrompt) {
 		body: JSON.stringify({
 			model: modelName,
 			messages: messages,
-			// stream: false // Ensure streaming is off if not handled
 		}),
 	});
 
 	if (!response.ok) {
 		let errorBody = "Could not retrieve error details.";
+		let responseText = ""; // Variable to store raw response text
 		try {
-			errorBody = await response.text(); // Always try to get text first
-			const errorJson = JSON.parse(errorBody); // Then try to parse
+			responseText = await response.text(); // Get raw text first
+			errorBody = responseText; // Use raw text as default error body
+			const errorJson = JSON.parse(responseText); // Then try to parse
 			errorBody =
 				errorJson.error?.message ||
 				errorJson.detail ||
@@ -356,35 +376,59 @@ async function callPerplexityAPI(systemPrompt, userPrompt) {
 		} catch (e) {
 			console.warn(
 				"POPUP SCRIPT: Could not parse API error response as JSON.",
-				errorBody
+				responseText // Log the raw text
 			);
 		}
 		console.error(
 			`POPUP SCRIPT: API Error ${response.status} ${response.statusText}: ${errorBody}`
 		);
-		throw new Error(`API Error: ${response.status} - ${errorBody}`);
+		// Log the raw text too for non-ok responses
+		console.error("POPUP SCRIPT: Raw API Error Response Text:", responseText);
+		throw new Error(`API request failed: ${response.status} - ${errorBody}`);
 	}
 
 	const result = await response.json();
-	console.log("POPUP SCRIPT: API Response Received:", result); // Log the raw result
+	console.log("POPUP SCRIPT: Raw API Success Response:", result); // Log raw success response
 
-	// Adjust access based on potential variations in Perplexity's response structure
 	const botAnswer = result.choices?.[0]?.message?.content?.trim();
 
 	if (!botAnswer) {
 		console.error(
 			"POPUP SCRIPT: Unexpected API response format. 'content' not found:",
-			result
+			result // Log the result that caused the error
 		);
-		throw new Error("Received an unexpected response format from the API.");
+		// Add the raw result to the error message if possible
+		throw new Error(
+			`Received an unexpected response format from the API: ${JSON.stringify(
+				result
+			)}`
+		);
 	}
 
 	return botAnswer;
 }
 
+// --- callChatbotAPI (Handles its own state reset) ---
 async function callChatbotAPI(question, pageContextData) {
+	// Validate context data before proceeding
+	if (
+		!pageContextData ||
+		typeof pageContextData.pageHtml !== "string" ||
+		typeof pageContextData.pageUrl !== "string"
+	) {
+		console.error(
+			"POPUP SCRIPT: callChatbotAPI called without valid pageContextData."
+		);
+		addMessageToChat(
+			"Internal error: Missing page data for chatbot request.",
+			"bot"
+		);
+		statusElement.textContent = "Error.";
+		isWaitingForBot = false; // Reset state on early exit
+		return;
+	}
 	console.log("POPUP SCRIPT: Preparing general question for API.");
-	statusElement.textContent = "Asking Perplexity AI...";
+	statusElement.textContent = "Asking Perplexity AI..."; // Update status before async call
 
 	const systemPrompt = `You are a helpful research assistant specializing in the American Civil War.
 Use the provided HTML content of a photo page from civilwarphotosleuth.com as the primary context for your answer.
@@ -407,15 +451,36 @@ ${pageContextData.pageHtml}
 	} catch (error) {
 		console.error("POPUP SCRIPT: Error in callChatbotAPI:", error);
 		addMessageToChat(`Sorry, I encountered an error: ${error.message}`, "bot");
-		statusElement.textContent = "Error.";
+		statusElement.textContent = "API Error."; // More specific status
 	} finally {
-		isWaitingForBot = false; // Always ensure this resets
+		console.log(
+			"POPUP SCRIPT: Finalizing callChatbotAPI, resetting isWaitingForBot."
+		);
+		isWaitingForBot = false; // Reset waiting state ONLY after API call finishes/fails
 	}
 }
 
+// --- getBiographicalInfo (Handles its own state reset) ---
 async function getBiographicalInfo(pageContextData) {
+	// Validate context data before proceeding
+	if (
+		!pageContextData ||
+		typeof pageContextData.pageHtml !== "string" ||
+		typeof pageContextData.pageUrl !== "string"
+	) {
+		console.error(
+			"POPUP SCRIPT: getBiographicalInfo called without valid pageContextData."
+		);
+		addMessageToChat(
+			"Internal error: Missing page data for bio request.",
+			"bot"
+		);
+		statusElement.textContent = "Error.";
+		isWaitingForBot = false; // Reset state on early exit
+		return;
+	}
 	console.log("POPUP SCRIPT: Preparing bio request for API.");
-	statusElement.textContent = "Getting biographical info...";
+	statusElement.textContent = "Getting biographical info..."; // Update status before async call
 
 	const systemPrompt = `You are a helpful research assistant specializing in the American Civil War.
 Use the provided HTML content of a photo page from civilwarphotosleuth.com as the primary context.
@@ -451,18 +516,12 @@ ${pageContextData.pageHtml}
 		"Notes on Historical Significance or Legacy",
 	];
 
-	// Using Markdown formatting in the prompt itself
 	const user_prompt =
 		`Based *primarily* on the provided HTML content, please identify the main individual depicted or identified on the page. Then, provide a detailed biography for that person using both the information from the HTML and external web search results. Structure the biography using the following fields. If information is not found for a field, state "Unknown".\n\n**Fields:**\n` +
-		template_fields.map((field) => `- **${field}:**`).join("\n"); // Format fields as a Markdown list
+		template_fields.map((field) => `- **${field}:**`).join("\n");
 
 	try {
-		// console.log("POPUP SCRIPT: About to call Perplexity API (Bio Info)..."); // Already logged in callPerplexityAPI
 		const botAnswer = await callPerplexityAPI(systemPrompt, user_prompt);
-		// console.log( // Already logged in callPerplexityAPI
-		//     "POPUP SCRIPT: Perplexity API call succeeded (Bio Info). Response length:",
-		//     botAnswer ? botAnswer.length : "null/undefined"
-		// );
 		addMessageToChat(botAnswer, "bot");
 		statusElement.textContent = ""; // Clear status on success
 	} catch (error) {
@@ -471,8 +530,11 @@ ${pageContextData.pageHtml}
 			`Sorry, I encountered an error while fetching biographical info: ${error.message}`,
 			"bot"
 		);
-		statusElement.textContent = "Error.";
+		statusElement.textContent = "API Error."; // More specific status
 	} finally {
-		isWaitingForBot = false; // Always ensure this resets
+		console.log(
+			"POPUP SCRIPT: Finalizing getBiographicalInfo, resetting isWaitingForBot."
+		);
+		isWaitingForBot = false; // Reset waiting state ONLY after API call finishes/fails
 	}
 }
