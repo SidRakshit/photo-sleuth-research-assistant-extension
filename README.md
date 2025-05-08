@@ -55,5 +55,3 @@ This Chrome extension adds a side panel to photo detail pages on `civilwarphotos
 7.  **Clear Chat**: Click the "Clear Chat" button near the top right to clear the conversation display.
 8.  **Clear API Key**: Click the "Clear Key" button next to the API key input field to remove your saved key and disable the chat functions until a new key is saved.
 9.  The extension will extract page content (if not already cached), query the Perplexity AI API using your saved key, and display the response in the chat panel.
-
-## File Structure
